@@ -24,7 +24,7 @@ Instruction to run this code:
 #include <fcntl.h>
 #include <pulse/simple.h>
 #include <pulse/error.h>
-#define size 1024
+#define size 400
 #define PORT "3490" // the port client will be connecting to 
 
 #define MAXDATASIZE 100 // max number of bytes we can get at once 
@@ -75,32 +75,34 @@ void term_c(int sig)
 }
 int main(int argc, char *argv[])
 {
+	/*Attributes of a Sample on the server*/
     static const pa_sample_spec ss = {
         .format = PA_SAMPLE_S16LE,
         .rate = 44100,
         .channels = 2
     };
-    pa_simple *serve = NULL;
+    pa_simple *serve = NULL;//New server for playing or recording
     int ret = 1;
     int error;
 
-    pid_t parent_pid=getpid();
-    int sockfd, numbytes;  
+    pid_t parent_pid=getpid();//Parent process pid
+    int sockfd, numbytes;  // Communication on sock_fd
     char buf[size],msg[size];
     struct addrinfo hints, *servinfo, *p;
-    int rv;
     char s[INET6_ADDRSTRLEN];
-    //fd = open("rec.txt",O_WRONLY | O_CREAT,00644);
+	
     if (argc != 3) {
         fprintf(stderr,"usage: USR2 hostname\n");
         exit(1);
     }
-
+	
+	/*Initializing addrinfo struct*/
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;    //IPV4 or IPV6
     hints.ai_socktype = SOCK_STREAM;//TCP connection
-    /*Initializing and generating a linked 
-    list of all address family specified by hins struct*/
+    
+	/*Initializing and generating a linked 
+    list of all address family specified by hints struct*/
     if ((rv = getaddrinfo(argv[1], argv[2], &hints, &servinfo)) != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
         return 1;
@@ -114,36 +116,39 @@ int main(int argc, char *argv[])
             perror("USR2: socket");
             continue;
         }
-
+		/*Connecting socket to the address family*/
         if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
             close(sockfd);
             perror("USR2: connect");
             continue;
         }
-
-        break;
+		break;
     }
 
     if (p == NULL) {
         fprintf(stderr, "USR2: failed to connect\n");
         return 2;
     }
+	
     /*Converting ip address from from struct to string and printing*/
     inet_ntop(p->ai_family, get_in_addr((struct sockaddr *)p->ai_addr),
             s, sizeof s);
     printf("USR2: connecting to %s\nStart Typing...\n", s);
 
     /*Not required any more so freeing it*/
-    freeaddrinfo(servinfo); 
+    freeaddrinfo(servinfo);
+	
     pid=fork();
     numbytes  = 1;
-    /*Child Process*/
+    
+	/*Child Process*/
     if(pid ==0)
     {
         /*Registering SIGINT signal*/
         if(signal(SIGINT,term_p)==SIG_ERR){
                 printf("Can't Catch SIGINT\n");
             }
+		/*Setting up server for playing into the connected speakers*/
         if (!(serve = pa_simple_new(NULL, argv[0], PA_STREAM_PLAYBACK, NULL, "play", &ss, NULL, NULL, &error))) 
         {
             fprintf(stderr, __FILE__": pa_simple_new() failed: %s\n", pa_strerror(error));
@@ -154,7 +159,6 @@ int main(int argc, char *argv[])
         while(numbytes!=0)
         {
             numbytes=recv(sockfd, buf, sizeof(buf), 0);
-            printf("Reading\n");
             if (numbytes== -1) 
             {
                 perror("recv");
@@ -162,12 +166,12 @@ int main(int argc, char *argv[])
             }
             if(numbytes!=0)
             {
+				/*Writing to the Server from the buffer*/
                 if (pa_simple_write(serve, buf, sizeof(buf), &error) < 0) 
                 {
                     fprintf(stderr, __FILE__": pa_simple_write() failed: %s\n", pa_strerror(error));
                     goto finish;
                 }
-                printf("Playing\n");
             }
             else if(numbytes==0){printf("USR1's sending end is closed...Exiting USR2's receving end!!!\n");}
         }
@@ -183,6 +187,7 @@ int main(int argc, char *argv[])
         if(signal(SIGINT,term_c)==SIG_ERR){
                 printf("Can't Catch SIGINT\n");
         }
+		/*Setting up server for recording from the connected microphone*/
         if (!(serve = pa_simple_new(NULL, argv[0], PA_STREAM_RECORD, NULL, "record", &ss, NULL, NULL, &error))) 
         {
         fprintf(stderr, __FILE__": pa_simple_new() failed: %s\n", pa_strerror(error));
@@ -191,6 +196,7 @@ int main(int argc, char *argv[])
         /*Infinite loop of taking input from user and sending through socket*/
          while(1)
         {
+			/*Reading From the Server Into the msg Buffer*/
             if (pa_simple_read(serve, msg, sizeof(msg), &error) < 0) 
             {
                 fprintf(stderr, __FILE__": pa_simple_read() failed: %s\n", pa_strerror(error));
@@ -203,7 +209,7 @@ int main(int argc, char *argv[])
             }
         }
     }
-    /*Closing the socket Descriptor*/
+    /*Closing the socket Descriptor freeing the Server*/
     ret = 0;
     finish:
     close(sockfd);
