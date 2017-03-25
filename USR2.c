@@ -90,7 +90,7 @@ int main(int argc, char *argv[])
     char buf[size],msg[size];
     struct addrinfo hints, *servinfo, *p;
     char s[INET6_ADDRSTRLEN];
-	
+    int rv;
     if (argc != 3) {
         fprintf(stderr,"usage: USR2 hostname\n");
         exit(1);
