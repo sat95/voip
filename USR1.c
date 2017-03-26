@@ -26,9 +26,15 @@ Instruction to run this code:
 #include <fcntl.h>
 #include <pulse/simple.h>
 #include <pulse/error.h>
+#include <time.h>
 #define BACKLOG 10     // how many pending connections queue will hold
-#define size 400
-pid_t pid;
+#define size 1024
+#define interval 10000
+pid_t pid,parent_pid;
+pa_simple *serve = NULL; //New server for playing or recording
+int error;
+int sockfd, new_fd,numbytes;  // listen on sock_fd, new connection on new_fd
+char msg[size],buffer[size];
 void sigchld_handler(int s)
 {
     // waitpid() might overwrite errno, so we save and restore it:
@@ -83,6 +89,53 @@ void term_c(int sig)
         printf("Continuing...Start Typing\n");
     }
 }
+void signal_handler_c(int signal){
+	/*If there is incoming steam of bytes keep 
+        reading and printing on user stdout*/
+        if(signal==SIGALRM&&numbytes!=0)
+        {
+            numbytes=recv(new_fd, buffer, sizeof(buffer), 0);
+            if (numbytes== -1) 
+            {
+                perror("recv");
+                exit(1);
+            }
+            if(numbytes!=0)
+            {
+				/*Writing to the Server from the buffer*/
+            	if (pa_simple_write(serve, buffer, sizeof(buffer), &error) < 0) 
+                {
+                    fprintf(stderr, __FILE__": pa_simple_write() failed: %s\n", pa_strerror(error));
+                    close(new_fd);
+    				close(sockfd);
+    				pa_simple_free(serve);
+    				exit(1);
+                }
+            }
+            else if(numbytes==0){printf("USR2's sending end is closed...Exiting USR1's receving end!!!\n");}
+        }
+        else kill(parent_pid,SIGTERM);
+}
+void signal_handler_p(int signal){
+	/*Taking input from user and sending through socket*/
+        if(signal==SIGALRM)
+        {
+			/*Reading From the Server Into the msg Buffer*/
+        	if (pa_simple_read(serve, msg, sizeof(msg), &error) < 0) 
+        	{
+            	fprintf(stderr, __FILE__": pa_simple_read() failed: %s\n", pa_strerror(error));
+            	close(new_fd);
+    			close(sockfd);
+    			pa_simple_free(serve);
+    			exit(1);
+        	}
+            if (send(new_fd, msg,sizeof(msg),0) == -1)
+            {
+                perror("send");
+                exit(1);
+            }
+        }
+}
 int main(int argc,char *argv[])
 {	
 	/*Attributes of a Sample on the server*/
@@ -91,12 +144,9 @@ int main(int argc,char *argv[])
         .rate = 44100,
         .channels = 2
     };
-    pa_simple *serve = NULL; //New server for playing or recording
-    int ret = 1;
-    int error;
     
-    pid_t parent_pid=getpid(); //Parent process pid
-    int sockfd, new_fd,numbytes;  // listen on sock_fd, new connection on new_fd
+    int ret = 1;
+    parent_pid=getpid(); //Parent process pid
     struct addrinfo hints, *servinfo, *p;
     struct sockaddr_storage their_addr; // connector's address information
     socklen_t sin_size;
@@ -105,7 +155,6 @@ int main(int argc,char *argv[])
     int yes=1;
     char s[INET6_ADDRSTRLEN];
     int rv;
-    char msg[size],buffer[size];
     
 	/*Initializing addrinfo struct*/
     memset(&hints, 0, sizeof hints);
@@ -184,49 +233,52 @@ int main(int argc,char *argv[])
     	get_in_addr((struct sockaddr *)&their_addr),
     	s,sizeof s);
     printf("USR1: got connection from %s\nStart Typing...\n", s);
+    timer_t timer_id;
+    /*Initial value and interval period of timer*/
+    struct itimerspec time;
+    time.it_value.tv_sec=0;
+    time.it_value.tv_nsec=interval;//Period of 10usec
+    time.it_interval = time.it_value;
 	pid=fork();
     numbytes  = 1;
     
 	/*Child Process*/
     if(pid==0)
     {
-        /*Registering SIGINT signal*/
-    	if(signal(SIGINT,term_p)==SIG_ERR){
-    		printf("Can't Catch SIGINT\n");
-    	}
-		/*Setting up server for playing into the connected speakers*/
     	if (!(serve = pa_simple_new(NULL, argv[0], PA_STREAM_PLAYBACK, NULL, "play", &ss, NULL, NULL, &error))) 
     	{
         	fprintf(stderr, __FILE__": pa_simple_new() failed: %s\n", pa_strerror(error));
         	goto finish;
     	}
-        /*While there is incoming steam of bytes keep 
-        reading and printing on user stdout*/
-        while(numbytes!=0)
-        {
-            numbytes=recv(new_fd, buffer, sizeof(buffer), 0);
-            if (numbytes== -1) 
-            {
-                perror("recv");
-                exit(1);
-            }
-            if(numbytes!=0)
-            {
-				/*Writing to the Server from the buffer*/
-            	if (pa_simple_write(serve, buffer, sizeof(buffer), &error) < 0) 
-                {
-                    fprintf(stderr, __FILE__": pa_simple_write() failed: %s\n", pa_strerror(error));
-                    goto finish;
-                }
-            }
-            else if(numbytes==0){printf("USR2's sending end is closed...Exiting USR1's receving end!!!\n");}
-        }
-        kill(parent_pid,SIGTERM);
+        /*Registering SIGINT signal*/
+    	if(signal(SIGINT,term_p)==SIG_ERR){
+    		printf("Can't Catch SIGINT\n");
+    	}
+		/*Setting up server for playing into the connected speakers*/
+    	/*Registering SIGALRM signal which will be generated on timer expiration*/
+    	if(signal(SIGALRM,signal_handler_c)==SIG_ERR){
+    		perror("Signal");
+    	}
+    	/*Timer creation with real time clock*/
+    	if(timer_create(CLOCK_REALTIME,NULL,&timer_id)==-1){
+    		perror("Timer_create");
+    	}
+    	/*Setting Timer value and interval*/
+    	if(timer_settime(timer_id,0,&time,NULL)==-1){
+    		perror("Timer_settime");
+    	}	
+      	while(1);
     }
     
 	/*Parent Process*/
     else
     {
+    	/*Setting up server for recording from the connected microphone*/
+    	if (!(serve = pa_simple_new(NULL, argv[0], PA_STREAM_RECORD, NULL, "record", &ss, NULL, NULL, &error))) 
+    	{
+        	fprintf(stderr, __FILE__": pa_simple_new() failed: %s\n", pa_strerror(error));
+        	goto finish;
+    	}
     	/*Registering SIGCONT and SIGINT signals*/
     	if(signal(SIGCONT,noth)==SIG_ERR){
             printf("Can't Catch SIGCONT\n");
@@ -234,27 +286,19 @@ int main(int argc,char *argv[])
     	if(signal(SIGINT,term_c)==SIG_ERR){
     		printf("Can't Catch SIGINT\n");
     	}
-		/*Setting up server for recording from the connected microphone*/
-    	if (!(serve = pa_simple_new(NULL, argv[0], PA_STREAM_RECORD, NULL, "record", &ss, NULL, NULL, &error))) 
-    	{
-        	fprintf(stderr, __FILE__": pa_simple_new() failed: %s\n", pa_strerror(error));
-        	goto finish;
+    	/*Registering SIGALRM signal which will be generated on timer expiration*/
+    	if(signal(SIGALRM,signal_handler_p)==SIG_ERR){
+    		perror("Signal");
     	}
-        /*Infinite loop of taking input from user and sending through socket*/
-        while(1)
-        {
-			/*Reading From the Server Into the msg Buffer*/
-        	if (pa_simple_read(serve, msg, sizeof(msg), &error) < 0) 
-        	{
-            	fprintf(stderr, __FILE__": pa_simple_read() failed: %s\n", pa_strerror(error));
-            	goto finish;
-        	}
-            if (send(new_fd, msg,sizeof(msg),0) == -1)
-            {
-                perror("send");
-                exit(1);
-            }
-        }
+    	/*Timer creation with real time clock*/
+    	if(timer_create(CLOCK_REALTIME,NULL,&timer_id)==-1){
+    		perror("Timer_create");
+    	}
+    	/*Setting Timer value and interval*/
+    	if(timer_settime(timer_id,0,&time,NULL)==-1){
+    		perror("Timer_settime");
+    	}
+    	while(1);
     }
     
 	/*Closing the socket Descriptor freeing the Server*/
@@ -262,8 +306,7 @@ int main(int argc,char *argv[])
 	finish:
 	close(new_fd);
     close(sockfd);
-    if (s)
-        pa_simple_free(serve);
+    pa_simple_free(serve);
     return ret;
 }
 
