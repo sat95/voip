@@ -25,16 +25,18 @@ Instruction to run this code:
 #include <pulse/simple.h>
 #include <pulse/error.h>
 #include <time.h>
+#include "g711.c"
 #define size 1024
 #define PORT "3490" // the port client will be connecting to 
-#define interval 10000
+#define interval 1000
 #define MAXDATASIZE 100 // max number of bytes we can get at once 
 pid_t pid,parent_pid;
 int fd;
 pa_simple *serve;//New server for playing or recording
 int error;
 int sockfd, numbytes;  // Communication on sock_fd
-char buf[size],msg[size];
+uint16_t outbuf[size],inmsg[size];
+uint8_t inbuf[size],outmsg[size];
 // get sockaddr, IPv4 or IPv6:
 void *get_in_addr(struct sockaddr *sa)
 {
@@ -81,18 +83,24 @@ void term_c(int sig)
 void signal_handler_c(int signal){
     /*If there is incoming steam of bytes keep 
         reading and printing on user stdout*/
+        int i;
         if(signal==SIGALRM&&numbytes!=0)
         {
-            numbytes=recv(sockfd, buf, sizeof(buf), 0);
+            numbytes=recv(sockfd, inbuf, sizeof(inbuf), 0);
             if (numbytes== -1) 
             {
                 perror("recv");
                 exit(1);
             }
+            //Conversion of  ulaw8 to pcm16 (G711 codec)
+            for(i=0;i<sizeof(inbuf)/sizeof(inbuf[0]);i++)
+            {
+                outbuf[i]=Snack_Mulaw2Lin(inbuf[i]);
+            }
             if(numbytes!=0)
             {
                 /*Writing to the Server from the buffer*/
-                if (pa_simple_write(serve, buf, sizeof(buf), &error) < 0) 
+                if (pa_simple_write(serve, outbuf, sizeof(outbuf), &error) < 0) 
                 {
                     fprintf(stderr, __FILE__": pa_simple_write() failed: %s\n", pa_strerror(error));
                     close(sockfd);
@@ -106,17 +114,23 @@ void signal_handler_c(int signal){
 }
 void signal_handler_p(int signal){
     /*Taking input from user and sending through socket*/
+        int i;
         if(signal==SIGALRM)
         {
             /*Reading From the Server Into the msg Buffer*/
-            if (pa_simple_read(serve, msg, sizeof(msg), &error) < 0) 
+            if (pa_simple_read(serve, inmsg, sizeof(inmsg), &error) < 0) 
             {
                 fprintf(stderr, __FILE__": pa_simple_read() failed: %s\n", pa_strerror(error));
                 close(sockfd);
                 pa_simple_free(serve);
                 exit(1);
             }
-            if (send(sockfd, msg,sizeof(msg),0) == -1)
+            //Conversion of pcm16 to ulaw8 (G711 codec)
+            for(i=0;i<sizeof(inmsg)/sizeof(inmsg[0]);i++)
+            {
+                outmsg[i]=Snack_Lin2Mulaw(inmsg[i]);
+            }
+            if (send(sockfd, outmsg,sizeof(outmsg),0) == -1)
             {
                 perror("send");
                 exit(1);
